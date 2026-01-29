@@ -1,0 +1,21 @@
+# MCP Memory Server Dependencies - Longbow Backend
+mcp>=1.0.0
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.5.0
+sentence-transformers>=2.3.0
+numpy>=1.24.0
+python-multipart>=0.0.6
+websockets>=12.0
+
+# Longbow Vector Database SDK
+pyarrow>=14.0.0
+grpcio>=1.50.0
+protobuf>=4.25.0
+pandas>=2.0.0
+
+# HTTP client for health checks
+httpx>=0.25.0
+
+# SSE transport
+starlette>=0.35.0

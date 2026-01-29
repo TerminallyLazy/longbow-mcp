@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "mcp-memory": {
+      "command": "bash",
+      "args": ["/Users/lazy/Projects/mcp-memory/run_mcp_debug.sh"],
+      "env": {
+        "LONGBOW_DATA_URI": "grpc://localhost:3000",
+        "LONGBOW_META_URI": "grpc://localhost:3001"
+      }
+    }
+  }
+}

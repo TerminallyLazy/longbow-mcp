@@ -1,0 +1,96 @@
+services:
+  # Longbow Vector Database
+  longbow:
+    image: ghcr.io/23skdu/longbow:latest
+    container_name: mcp-memory-longbow
+    ports:
+      - "3000:3000"   # Data server (Arrow Flight)
+      - "3001:3001"   # Meta server
+      - "9090:9090"   # Prometheus metrics
+    environment:
+      - LISTEN_ADDR=0.0.0.0:3000
+      - META_ADDR=0.0.0.0:3001
+      - METRICS_ADDR=0.0.0.0:9090
+      - LOG_LEVEL=info
+      - LOG_FORMAT=json
+      - STORAGE_PATH=/data
+      - WAL_ENABLED=true
+      - SNAPSHOT_ENABLED=true
+    volumes:
+      - longbow_data:/data
+    networks:
+      - mcp-network
+    # Note: Longbow uses distroless image, no shell/wget available
+    # Server logs "Listening for Data gRPC connections" when ready
+
+  # MCP Memory Server
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile.server
+    container_name: mcp-memory-server
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LONGBOW_DATA_URI=grpc://longbow:3000
+      - LONGBOW_META_URI=grpc://longbow:3001
+    depends_on:
+      - longbow
+    # Wait for Longbow to be ready before connecting
+    restart: on-failure
+    networks:
+      - mcp-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # MCP SSE Server (for Agent Zero and other SSE clients)
+  mcp-sse:
+    build:
+      context: ./server
+      dockerfile: Dockerfile.server
+    container_name: mcp-memory-sse
+    command: python mcp_server_sse.py
+    ports:
+      - "8765:8765"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LONGBOW_DATA_URI=grpc://longbow:3000
+      - LONGBOW_META_URI=grpc://longbow:3001
+      - MCP_SSE_PORT=8765
+    depends_on:
+      - longbow
+    restart: on-failure
+    networks:
+      - mcp-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8765/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Dashboard UI
+  ui:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile.ui
+    container_name: mcp-memory-ui
+    ports:
+      - "3080:80"
+    depends_on:
+      - server
+    networks:
+      - mcp-network
+
+networks:
+  mcp-network:
+    driver: bridge
+
+volumes:
+  longbow_data:
+    driver: local
