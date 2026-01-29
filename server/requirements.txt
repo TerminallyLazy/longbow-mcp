@@ -8,11 +8,8 @@ numpy>=1.24.0
 python-multipart>=0.0.6
 websockets>=12.0
 
-# Longbow Vector Database SDK
-pyarrow>=14.0.0
-grpcio>=1.50.0
-protobuf>=4.25.0
-pandas>=2.0.0
+# Longbow Vector Database SDK (includes pyarrow, grpcio, protobuf, pandas transitively)
+longbowclientsdk @ git+https://github.com/23skdu/longbow.git#subdirectory=longbowclientsdk
 
 # HTTP client for health checks
 httpx>=0.25.0

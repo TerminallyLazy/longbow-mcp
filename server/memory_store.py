@@ -1,4 +1,4 @@
-"""Vector memory storage using Longbow distributed vector database."""
+"""Vector memory storage using Longbow distributed vector database (SDK)."""
 import json
 import os
 import time
@@ -7,221 +7,23 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any
 import logging
 
-import numpy as np
 import pandas as pd
-import pyarrow as pa
-import pyarrow.flight as flight
 from sentence_transformers import SentenceTransformer
+from longbow import LongbowClient
+from longbow.exceptions import LongbowError, LongbowConnectionError, LongbowQueryError
 
 from models import Memory, SearchResult
 
 logger = logging.getLogger(__name__)
 
 
-class LongbowClient:
-    """Arrow Flight client for Longbow vector database.
-
-    Follows the official Longbow SDK API patterns:
-    - Data server (port 3000): DoPut, DoGet for vectors
-    - Meta server (port 3001): DoAction, ListFlights for metadata
-    """
-
-    def __init__(self, data_uri: str = "grpc://localhost:3000", meta_uri: str = "grpc://localhost:3001"):
-        self.data_uri = data_uri
-        self.meta_uri = meta_uri
-        self._data_client: Optional[flight.FlightClient] = None
-        self._meta_client: Optional[flight.FlightClient] = None
-
-    def connect(self, max_retries: int = 30, delay: float = 2.0):
-        """Connect to both Longbow servers with retry."""
-        # Connect meta server first (has ListFlights for health check)
-        for attempt in range(max_retries):
-            try:
-                self._meta_client = flight.connect(self.meta_uri)
-                # Test connection
-                list(self._meta_client.list_flights())
-                logger.info(f"Connected to Longbow meta server at {self.meta_uri}")
-                break
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    logger.warning(f"Waiting for Longbow meta server ({attempt + 1}/{max_retries}): {e}")
-                    time.sleep(delay)
-                else:
-                    raise ConnectionError(f"Failed to connect to Longbow meta server: {e}")
-
-        # Connect data server
-        self._data_client = flight.connect(self.data_uri)
-        logger.info(f"Connected to Longbow data server at {self.data_uri}")
-
-    def _ensure_connected(self):
-        """Ensure we're connected to Longbow."""
-        if self._meta_client is None or self._data_client is None:
-            self.connect()
-
-    def create_namespace(self, name: str, force: bool = False) -> bool:
-        """Create a namespace (dataset) in Longbow."""
-        self._ensure_connected()
-        try:
-            action_body = json.dumps({"name": name, "overwrite": force}).encode("utf-8")
-            action = flight.Action("CreateNamespace", action_body)
-            list(self._meta_client.do_action(action))
-            logger.info(f"Created namespace: {name}")
-            return True
-        except Exception as e:
-            # Namespace may already exist
-            logger.warning(f"Namespace creation (may already exist): {e}")
-            return False
-
-    def list_namespaces(self) -> List[str]:
-        """List all namespaces."""
-        self._ensure_connected()
-        try:
-            return [
-                f.descriptor.path[0].decode("utf-8")
-                for f in self._meta_client.list_flights()
-            ]
-        except Exception as e:
-            logger.error(f"Failed to list namespaces: {e}")
-            return []
-
-    def insert(self, namespace: str, records: List[Dict[str, Any]]) -> bool:
-        """Insert vectors into a namespace using DoPut."""
-        if not records:
-            return True
-
-        self._ensure_connected()
-        try:
-            # Build Arrow table from records
-            ids = [r["id"] for r in records]
-            vectors = [r["vector"] for r in records]
-            metadata = [json.dumps(r.get("metadata", {})) for r in records]
-            timestamps = [r.get("timestamp", datetime.utcnow().isoformat()) for r in records]
-
-            # Create fixed-size list array for vectors
-            dim = len(vectors[0])
-            flat_vectors = np.array(vectors, dtype=np.float32).flatten()
-            vector_array = pa.FixedSizeListArray.from_arrays(
-                pa.array(flat_vectors, type=pa.float32()),
-                dim
-            )
-
-            table = pa.table({
-                "id": pa.array(ids, type=pa.string()),
-                "vector": vector_array,
-                "metadata": pa.array(metadata, type=pa.string()),
-                "timestamp": pa.array(timestamps, type=pa.string()),
-            })
-
-            # Upload via DoPut
-            descriptor = flight.FlightDescriptor.for_path(namespace)
-            writer, reader = self._data_client.do_put(descriptor, table.schema)
-            writer.write_table(table)
-            writer.done_writing()
-
-            # Consume acknowledgment
-            try:
-                reader.read()
-            except (StopIteration, AttributeError):
-                pass
-
-            logger.info(f"Inserted {len(records)} records into {namespace}")
-            return True
-        except Exception as e:
-            logger.error(f"Insert failed: {e}")
-            raise
-
-    def search(self, namespace: str, query_vector: List[float], k: int = 5) -> List[Dict[str, Any]]:
-        """Search for similar vectors using DoGet with search ticket."""
-        self._ensure_connected()
-        try:
-            # Build search request following SDK format
-            search_req = {
-                "search": {
-                    "dataset": namespace,
-                    "vector": query_vector,
-                    "k": k,
-                }
-            }
-            ticket = flight.Ticket(json.dumps(search_req).encode("utf-8"))
-            reader = self._data_client.do_get(ticket)
-            table = reader.read_all()
-
-            logger.info(f"Search returned columns: {table.column_names}")
-
-            results = []
-            for i in range(table.num_rows):
-                # ID might be index or string - ensure it's string
-                raw_id = table["id"][i].as_py() if "id" in table.column_names else i
-                result = {"id": str(raw_id)}
-
-                if "score" in table.column_names:
-                    result["score"] = float(table["score"][i].as_py())
-                elif "distance" in table.column_names:
-                    # Convert distance to similarity
-                    dist = float(table["distance"][i].as_py())
-                    result["score"] = 1.0 / (1.0 + dist)
-                else:
-                    result["score"] = 1.0
-                if "vector" in table.column_names:
-                    result["vector"] = table["vector"][i].as_py()
-                if "metadata" in table.column_names:
-                    meta_raw = table["metadata"][i].as_py()
-                    result["metadata"] = json.loads(meta_raw) if meta_raw else {}
-                results.append(result)
-
-            return results
-        except Exception as e:
-            logger.error(f"Search failed: {e}")
-            return []
-
-    def download_all(self, namespace: str) -> List[Dict[str, Any]]:
-        """Download all records from a namespace."""
-        self._ensure_connected()
-        try:
-            # Use namespace as ticket for full download
-            ticket = flight.Ticket(namespace.encode("utf-8"))
-            reader = self._data_client.do_get(ticket)
-            table = reader.read_all()
-
-            results = []
-            for i in range(table.num_rows):
-                record = {"id": table["id"][i].as_py()}
-                if "vector" in table.column_names:
-                    record["vector"] = table["vector"][i].as_py()
-                if "metadata" in table.column_names:
-                    record["metadata"] = json.loads(table["metadata"][i].as_py() or "{}")
-                if "timestamp" in table.column_names:
-                    record["timestamp"] = table["timestamp"][i].as_py()
-                results.append(record)
-
-            return results
-        except Exception as e:
-            logger.error(f"Download failed: {e}")
-            return []
-
-    def delete_namespace(self, namespace: str) -> bool:
-        """Delete entire namespace."""
-        self._ensure_connected()
-        try:
-            action_body = json.dumps({"name": namespace}).encode("utf-8")
-            action = flight.Action("DeleteNamespace", action_body)
-            list(self._meta_client.do_action(action))
-            logger.info(f"Deleted namespace: {namespace}")
-            return True
-        except Exception as e:
-            logger.error(f"Delete namespace failed: {e}")
-            return False
-
-    def close(self):
-        """Close client connections."""
-        if self._data_client:
-            self._data_client.close()
-        if self._meta_client:
-            self._meta_client.close()
+def _uuid_to_graph_id(uuid_str: str) -> int:
+    """Map a UUID string to an int64 graph node ID for Longbow graph operations."""
+    return abs(hash(uuid_str)) % (2**53)
 
 
 class MemoryStore:
-    """Longbow-backed vector memory store."""
+    """Longbow SDK-backed vector memory store."""
 
     NAMESPACE = "mcp_memories"
     EMBEDDING_DIM = 384  # all-MiniLM-L6-v2
@@ -245,19 +47,99 @@ class MemoryStore:
         return self._model
 
     def _get_client(self) -> LongbowClient:
-        """Get or create Longbow client."""
+        """Get or create Longbow SDK client with retry logic."""
         if self._client is None:
-            self._client = LongbowClient(
-                data_uri=self.longbow_data_uri,
-                meta_uri=self.longbow_meta_uri,
-            )
-            self._client.connect()
+            max_retries = 30
+            delay = 2.0
+
+            for attempt in range(max_retries):
+                try:
+                    client = LongbowClient(
+                        uri=self.longbow_data_uri,
+                        meta_uri=self.longbow_meta_uri,
+                    )
+                    client.connect()
+                    # Test connection by listing namespaces
+                    client.list_namespaces()
+                    self._client = client
+                    logger.info("Connected to Longbow via SDK")
+                    break
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Waiting for Longbow ({attempt + 1}/{max_retries}): {e}")
+                        time.sleep(delay)
+                    else:
+                        raise ConnectionError(f"Failed to connect to Longbow after {max_retries} attempts: {e}")
 
             # Ensure namespace exists
             if not self._initialized:
-                self._client.create_namespace(self.NAMESPACE)
+                try:
+                    self._client.create_namespace(self.NAMESPACE)
+                except Exception:
+                    pass  # Namespace may already exist
                 self._initialized = True
+
         return self._client
+
+    def _record_to_memory(self, record: Dict[str, Any]) -> Memory:
+        """Convert a raw Longbow record dict to a Memory object."""
+        meta = record.get("metadata", {})
+        if isinstance(meta, str):
+            meta = json.loads(meta) if meta else {}
+        return Memory(
+            id=str(record["id"]),
+            content=meta.get("content", ""),
+            embedding=record.get("vector"),
+            metadata={k: v for k, v in meta.items() if k not in ("content", "client_id", "created_at")},
+            created_at=datetime.fromisoformat(meta.get("created_at", datetime.utcnow().isoformat())),
+            client_id=meta.get("client_id", "unknown"),
+        )
+
+    def _df_to_search_results(self, df: pd.DataFrame) -> List[SearchResult]:
+        """Convert SDK search DataFrame to list of SearchResult."""
+        if df is None or df.empty:
+            return []
+
+        # Need full records to reconstruct Memory objects — download all and index by ID
+        client = self._get_client()
+        try:
+            all_table = client.download_arrow(self.NAMESPACE)
+            all_df = all_table.to_pandas()
+        except Exception:
+            all_df = pd.DataFrame()
+
+        # Build lookup maps
+        records_by_id = {}
+        records_by_index = {}
+        if not all_df.empty:
+            for idx, row in all_df.iterrows():
+                record = {
+                    "id": str(row.get("id", idx)),
+                    "vector": row.get("vector"),
+                    "metadata": row.get("metadata", "{}"),
+                }
+                records_by_id[record["id"]] = record
+                records_by_index[idx] = record
+
+        results = []
+        for _, row in df.iterrows():
+            raw_id = str(row.get("id", ""))
+            score = float(row.get("score", row.get("distance", 0.0)))
+            # Convert distance to similarity if needed
+            if "distance" in df.columns and "score" not in df.columns:
+                score = 1.0 / (1.0 + score)
+
+            record = records_by_id.get(raw_id)
+            if record is None and raw_id.lstrip('-').isdigit():
+                record = records_by_index.get(int(raw_id))
+
+            if record:
+                memory = self._record_to_memory(record)
+                results.append(SearchResult(memory=memory, score=score))
+            else:
+                logger.warning(f"Could not find record for search result ID: {raw_id}")
+
+        return results
 
     def add_memory(self, content: str, client_id: str, metadata: Dict = None) -> Memory:
         """Add a new memory with embedding."""
@@ -270,128 +152,162 @@ class MemoryStore:
             embedding=embedding,
             metadata=metadata or {},
             created_at=datetime.utcnow(),
-            client_id=client_id
+            client_id=client_id,
         )
 
-        # Store in Longbow
-        client = self._get_client()
-        record = {
+        # Build DataFrame for SDK insert
+        df = pd.DataFrame([{
             "id": memory.id,
             "vector": embedding,
-            "metadata": {
+            "metadata": json.dumps({
                 "content": content,
                 "client_id": client_id,
                 "created_at": memory.created_at.isoformat(),
                 **(metadata or {}),
-            },
+            }),
             "timestamp": memory.created_at.isoformat(),
-        }
+        }])
 
-        client.insert(self.NAMESPACE, [record])
+        client = self._get_client()
+        client.insert(self.NAMESPACE, df)
         return memory
 
     def search(self, query: str, top_k: int = 5) -> List[SearchResult]:
-        """Semantic search using vector similarity."""
+        """Semantic search using vector similarity (KNN)."""
         model = self._get_model()
         query_embedding = model.encode(query).tolist()
 
         client = self._get_client()
-        search_results_raw = client.search(self.NAMESPACE, query_embedding, k=top_k)
+        try:
+            result_df = client.search(self.NAMESPACE, query_embedding, k=top_k)
+        except LongbowQueryError as e:
+            logger.error(f"Search failed: {e}")
+            return []
 
-        # Search returns indices and scores - we need to fetch full records
-        # Download all records to match with search results
-        all_records = client.download_all(self.NAMESPACE)
+        return self._df_to_search_results(result_df)
 
-        # Build index lookup - search may return sequential indices
-        records_by_index = {i: r for i, r in enumerate(all_records)}
+    def hybrid_search(self, query: str, top_k: int = 5, alpha: float = 0.5) -> List[SearchResult]:
+        """Hybrid vector+text search with alpha blending."""
+        model = self._get_model()
+        query_embedding = model.encode(query).tolist()
+
+        client = self._get_client()
+        try:
+            result_df = client.search(
+                self.NAMESPACE, query_embedding, k=top_k,
+                alpha=alpha, text_query=query,
+            )
+        except LongbowQueryError as e:
+            logger.error(f"Hybrid search failed: {e}")
+            return []
+
+        return self._df_to_search_results(result_df)
+
+    def search_by_id(self, memory_id: str, top_k: int = 5) -> List[SearchResult]:
+        """Find memories similar to an existing memory by ID."""
+        client = self._get_client()
+        try:
+            raw = client.search_by_id(self.NAMESPACE, memory_id, k=top_k)
+        except LongbowQueryError as e:
+            logger.error(f"Search by ID failed: {e}")
+            return []
+
+        # raw is a dict with results — convert to list of SearchResult
+        if not raw:
+            return []
+
+        # The SDK returns a dict; extract results list
+        raw_results = raw.get("results", [])
+        if not raw_results:
+            return []
+
+        # Need full records for Memory objects
+        all_records = self._download_all_records()
         records_by_id = {r["id"]: r for r in all_records}
 
-        search_results = []
-        for sr in search_results_raw:
-            raw_id = sr["id"]
-            score = sr.get("score", 0.0)
-
-            # Try to find the record - could be by index or by actual ID
-            record = None
-            if raw_id in records_by_id:
-                record = records_by_id[raw_id]
-            elif raw_id.isdigit() or (isinstance(raw_id, str) and raw_id.lstrip('-').isdigit()):
-                idx = int(raw_id)
-                record = records_by_index.get(idx)
-
+        results = []
+        for item in raw_results:
+            rid = str(item.get("id", ""))
+            score = float(item.get("score", 0.0))
+            record = records_by_id.get(rid)
             if record:
-                meta = record.get("metadata", {})
-                memory = Memory(
-                    id=record["id"],
-                    content=meta.get("content", ""),
-                    embedding=record.get("vector"),
-                    metadata={k: v for k, v in meta.items() if k not in ("content", "client_id", "created_at")},
-                    created_at=datetime.fromisoformat(meta.get("created_at", datetime.utcnow().isoformat())),
-                    client_id=meta.get("client_id", "unknown"),
-                )
-                search_results.append(SearchResult(memory=memory, score=score))
-            else:
-                # Fallback: create a placeholder memory if we can't find the record
-                logger.warning(f"Could not find record for search result ID: {raw_id}")
+                memory = self._record_to_memory(record)
+                results.append(SearchResult(memory=memory, score=score))
 
-        return search_results
+        return results
+
+    def filtered_search(self, query: str, top_k: int = 5, filters: List[Dict] = None) -> List[SearchResult]:
+        """Vector search with metadata predicate filters."""
+        model = self._get_model()
+        query_embedding = model.encode(query).tolist()
+
+        client = self._get_client()
+        try:
+            result_df = client.search(
+                self.NAMESPACE, query_embedding, k=top_k,
+                filters=filters,
+            )
+        except LongbowQueryError as e:
+            logger.error(f"Filtered search failed: {e}")
+            return []
+
+        return self._df_to_search_results(result_df)
 
     def list_memories(self, limit: int = 50, offset: int = 0) -> tuple[List[Memory], int]:
         """List all memories with pagination."""
-        client = self._get_client()
-        all_records = client.download_all(self.NAMESPACE)
-
+        all_records = self._download_all_records()
         total = len(all_records)
 
         # Sort by created_at descending
         all_records.sort(
-            key=lambda r: r.get("metadata", {}).get("created_at", ""),
-            reverse=True
+            key=lambda r: r.get("metadata", {}).get("created_at", "") if isinstance(r.get("metadata"), dict) else "",
+            reverse=True,
         )
 
-        # Apply pagination
         paginated = all_records[offset:offset + limit]
-
-        memories = []
-        for r in paginated:
-            meta = r.get("metadata", {})
-            memories.append(Memory(
-                id=r["id"],
-                content=meta.get("content", ""),
-                embedding=r.get("vector"),
-                metadata={k: v for k, v in meta.items() if k not in ("content", "client_id", "created_at")},
-                created_at=datetime.fromisoformat(meta.get("created_at", datetime.utcnow().isoformat())),
-                client_id=meta.get("client_id", "unknown"),
-            ))
-
+        memories = [self._record_to_memory(r) for r in paginated]
         return memories, total
 
     def delete_all(self) -> int:
         """Delete all memories."""
         client = self._get_client()
-
-        # Get count first
-        all_records = client.download_all(self.NAMESPACE)
-        count = len(all_records)
-
-        # Delete namespace and recreate
+        count = self._get_record_count()
         client.delete_namespace(self.NAMESPACE)
-        client.create_namespace(self.NAMESPACE)
-
+        try:
+            client.create_namespace(self.NAMESPACE)
+        except Exception:
+            pass
         return count
 
     def get_stats(self) -> Dict[str, Any]:
         """Get memory store statistics."""
         client = self._get_client()
 
-        # Count manually
-        all_records = client.download_all(self.NAMESPACE)
+        # Try efficient get_info first
+        try:
+            info = client.get_info(self.NAMESPACE)
+            total = info.get("total_records", -1)
+        except Exception:
+            total = -1
+
+        # If get_info returned -1 (unknown), fall back to download
+        if total < 0:
+            all_records = self._download_all_records()
+            total = len(all_records)
+        else:
+            all_records = None
+
+        # For client/date stats, we need the actual records
+        if all_records is None:
+            all_records = self._download_all_records()
+
         clients = set()
         oldest = None
         newest = None
-
         for r in all_records:
             meta = r.get("metadata", {})
+            if isinstance(meta, str):
+                meta = json.loads(meta) if meta else {}
             clients.add(meta.get("client_id", "unknown"))
             created = meta.get("created_at")
             if created:
@@ -401,12 +317,84 @@ class MemoryStore:
                     newest = created
 
         return {
-            "total_memories": len(all_records),
+            "total_memories": total if total >= 0 else len(all_records),
             "unique_clients": len(clients),
             "oldest_memory": oldest,
             "newest_memory": newest,
             "backend": "longbow",
         }
+
+    def add_edge(self, source_id: str, target_id: str, predicate: str = "related_to", weight: float = 1.0) -> None:
+        """Add a directed relationship edge between two memories."""
+        client = self._get_client()
+        subject = _uuid_to_graph_id(source_id)
+        obj = _uuid_to_graph_id(target_id)
+        client.add_edge(self.NAMESPACE, subject=subject, predicate=predicate, object=obj, weight=weight)
+
+    def traverse(self, start_id: str, max_hops: int = 2, incoming: bool = False, decay: float = 0.0, weighted: bool = True) -> List[Dict]:
+        """Graph traversal from a starting memory."""
+        client = self._get_client()
+        start = _uuid_to_graph_id(start_id)
+        return client.traverse(
+            self.NAMESPACE,
+            start=start,
+            max_hops=max_hops,
+            incoming=incoming,
+            decay=decay,
+            weighted=weighted,
+        )
+
+    def get_dataset_info(self) -> Dict[str, Any]:
+        """Get Longbow dataset metadata."""
+        client = self._get_client()
+        try:
+            return client.get_info(self.NAMESPACE)
+        except Exception as e:
+            logger.error(f"get_info failed: {e}")
+            return {"total_records": -1, "total_bytes": -1}
+
+    def snapshot(self) -> None:
+        """Trigger manual persistence snapshot."""
+        client = self._get_client()
+        client.snapshot()
+
+    # --- Internal helpers ---
+
+    def _download_all_records(self) -> List[Dict[str, Any]]:
+        """Download all records from the namespace as dicts."""
+        client = self._get_client()
+        try:
+            table = client.download_arrow(self.NAMESPACE)
+            df = table.to_pandas()
+        except Exception as e:
+            logger.error(f"Download failed: {e}")
+            return []
+
+        records = []
+        for _, row in df.iterrows():
+            record = {"id": str(row.get("id", ""))}
+            if "vector" in df.columns:
+                record["vector"] = row["vector"]
+            if "metadata" in df.columns:
+                meta_raw = row["metadata"]
+                record["metadata"] = json.loads(meta_raw) if isinstance(meta_raw, str) and meta_raw else (meta_raw if isinstance(meta_raw, dict) else {})
+            if "timestamp" in df.columns:
+                record["timestamp"] = row["timestamp"]
+            records.append(record)
+
+        return records
+
+    def _get_record_count(self) -> int:
+        """Get record count, preferring get_info over full download."""
+        client = self._get_client()
+        try:
+            info = client.get_info(self.NAMESPACE)
+            count = info.get("total_records", -1)
+            if count >= 0:
+                return count
+        except Exception:
+            pass
+        return len(self._download_all_records())
 
 
 # Global store instance
