@@ -72,8 +72,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="MCP Memory Server API",
-    description="REST API and WebSocket bridge for MCP Memory",
+    title="Longbow MCP API",
+    description="REST API and WebSocket bridge for Longbow MCP",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -92,7 +92,7 @@ app.add_middleware(
 async def root():
     """Root endpoint."""
     return {
-        "service": "MCP Memory Server",
+        "service": "Longbow MCP",
         "version": "1.0.0",
         "backend": "longbow",
         "endpoints": {
@@ -238,7 +238,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     await websocket.send_text(safe_json_dumps({
                         "type": "memories_list",
                         "data": {
-                            "memories": [m.dict() for m in memories],
+                            "memories": [m.model_dump(exclude={"embedding"}) for m in memories],
                             "total": total
                         }
                     }))
@@ -250,7 +250,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         "data": {
                             "query": data.get("query", ""),
                             "results": [
-                                {"memory": r.memory.dict(), "score": r.score}
+                                {"memory": r.memory.model_dump(exclude={"embedding"}), "score": r.score}
                                 for r in results
                             ]
                         }
@@ -264,7 +264,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     )
                     # Broadcast to all clients
                     await broadcast_update("memory_added", {
-                        "memory": memory.dict()
+                        "memory": memory.model_dump(exclude={"embedding"})
                     })
 
                 elif action == "delete_all":

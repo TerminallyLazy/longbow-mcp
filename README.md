@@ -1,20 +1,20 @@
-# MCP Memory Server
+# Longbow MCP
 
-A modern MCP (Model Context Protocol) server with real-time UI for cross-client persistent memory.
+A modern MCP (Model Context Protocol) server with real-time UI for cross-client persistent memory, powered by the Longbow distributed vector database.
 
 ## Features
 
-- **MCP Protocol**: Full MCP implementation for stdio transport
-- **Vector Search**: Semantic memory search using sqlite-vec + sentence-transformers
+- **MCP Protocol**: Full MCP implementation with stdio and SSE transports
+- **Vector Search**: Semantic memory search using Longbow (Apache Arrow Flight) + sentence-transformers
 - **Real-time UI**: WebSocket bridge with Three.js raymarching shader background
 - **Design System**: Midnight Emerald - Obsidian, Emerald, Cyber-Lime glassmorphism
-- **One-Command Deploy**: `./run.sh` starts everything
+- **One-Command Deploy**: `docker compose up -d` starts everything
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    MCP Memory Server                        │
+│                      Longbow MCP                            │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
 │   ┌──────────────┐      ┌──────────────┐                   │
@@ -22,10 +22,16 @@ A modern MCP (Model Context Protocol) server with real-time UI for cross-client 
 │   │   Protocol   │◄────►│   + WebSocket │                  │
 │   └──────────────┘      └──────┬───────┘                   │
 │                                │                            │
-│   ┌──────────────┐            │                            │
-│   │  MemoryStore │◄───────────┘                            │
-│   │  sqlite-vec  │                                         │
-│   └──────────────┘                                         │
+│   ┌──────────────┐      ┌─────┴────────┐                   │
+│   │  MCP SSE     │      │  MemoryStore │                   │
+│   │  Transport   │◄────►│  (Longbow)   │                   │
+│   └──────────────┘      └──────────────┘                   │
+│                                │                            │
+│                    ┌───────────┴───────────┐                │
+│                    │  Longbow Vector DB    │                │
+│                    │  Arrow Flight gRPC    │                │
+│                    │  Data:3000 Meta:3001  │                │
+│                    └──────────────────────┘                 │
 └─────────────────────────────────────────────────────────────┘
                               │
                               │ WebSocket
@@ -40,30 +46,75 @@ A modern MCP (Model Context Protocol) server with real-time UI for cross-client 
 ## Quick Start
 
 ```bash
-# Navigate to project
-cd /root/mcp-memory
+# Clone the repository
+git clone https://github.com/TerminallyLazy/longbow-mcp.git
+cd longbow-mcp
 
-# Run everything with one command
-./run.sh
+# Run everything with Docker Compose
+docker compose up -d
 ```
 
 ## Services
 
 | Service | URL | Description |
 |---------|-----|-------------|
-| API Server | http://localhost:8000 | FastAPI + MCP endpoints |
+| Longbow Data | grpc://localhost:3000 | Arrow Flight vector storage |
+| Longbow Meta | grpc://localhost:3001 | Arrow Flight metadata |
+| API Server | http://localhost:8000 | FastAPI + WebSocket endpoints |
 | API Docs | http://localhost:8000/docs | OpenAPI/Swagger UI |
-| Web UI | http://localhost:3000 | React + Three.js interface |
-| WebSocket | ws://localhost:8000/ws | Real-time memory updates |
+| MCP SSE | http://localhost:8765 | SSE transport for MCP clients |
+| Web UI | http://localhost:3080 | React + Three.js interface |
+| WebSocket | ws://localhost:3080/ws | Real-time memory updates (via nginx) |
 
 ## MCP Tools
 
-The server provides these MCP tools:
+The server provides these MCP tools via both stdio and SSE transports:
 
-- `add_memories` - Store new memory with embedding
-- `search_memory` - Semantic search using vector similarity
+- `add_memory` - Store new memory with semantic embedding
+- `search_memories` - Semantic search using vector similarity
 - `list_memories` - List all memories with pagination
 - `delete_all_memories` - Clear memory store
+
+## MCP Client Configuration
+
+### Claude Code (stdio)
+
+Add to your project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "longbow-mcp": {
+      "command": "python",
+      "args": ["server/mcp_server.py"],
+      "cwd": "/path/to/longbow-mcp"
+    }
+  }
+}
+```
+
+### Agent Zero / SSE Clients
+
+Use the SSE endpoint:
+
+```
+http://localhost:8765/sse
+```
+
+### Claude Desktop
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "longbow-mcp": {
+      "command": "bash",
+      "args": ["/path/to/longbow-mcp/run_mcp_server.sh"]
+    }
+  }
+}
+```
 
 ## UI Components
 
@@ -86,15 +137,18 @@ The server provides these MCP tools:
 ## File Structure
 
 ```
-/root/mcp-memory/
+longbow-mcp/
 ├── docker-compose.yml         # Services orchestration
-├── run.sh                     # One-command setup
+├── run_mcp_server.sh          # MCP stdio runner
+├── run_mcp_sse.sh             # MCP SSE runner
+├── setup.sh                   # Local dev setup
 ├── server/
 │   ├── Dockerfile.server      # Python container
 │   ├── requirements.txt       # Dependencies
 │   ├── models.py             # Pydantic models
-│   ├── memory_store.py       # Vector storage
-│   ├── mcp_server.py         # MCP protocol
+│   ├── memory_store.py       # Longbow vector storage
+│   ├── mcp_server.py         # MCP stdio protocol
+│   ├── mcp_server_sse.py     # MCP SSE protocol
 │   └── api.py                # FastAPI + WebSocket
 └── ui/
     ├── Dockerfile.ui          # Node container
@@ -120,32 +174,29 @@ The server provides these MCP tools:
 ## Manual Start (without Docker)
 
 ```bash
-# Terminal 1: Start API server
-cd /root/mcp-memory/server
+# Terminal 1: Start Longbow (requires Longbow installed)
+longbow serve
+
+# Terminal 2: Start API server
+cd server
 pip install -r requirements.txt
 uvicorn api:app --host 0.0.0.0 --port 8000
 
-# Terminal 2: Start UI dev server
-cd /root/mcp-memory/ui
+# Terminal 3: Start MCP SSE server
+cd server
+python mcp_server_sse.py
+
+# Terminal 4: Start UI dev server
+cd ui
 npm install
 npm run dev
-```
-
-## Testing with MCP Inspector
-
-```bash
-# Install MCP inspector
-npx @anthropic-ai/mcp-inspector
-
-# Test the server
-mcp-inspector /root/mcp-memory/server/mcp_server.py
 ```
 
 ## API Endpoints
 
 ### Health Check
 ```bash
-curl http://localhost:8000/
+curl http://localhost:8000/health
 ```
 
 ### List Memories
@@ -165,7 +216,7 @@ curl -X POST http://localhost:8000/search \
 curl -X POST http://localhost:8000/memories \
   -H "Content-Type: application/json" \
   -d '{
-    "contents": ["TensorFlow is a machine learning framework"],
+    "content": "TensorFlow is a machine learning framework",
     "metadata": {"category": "ai"}
   }'
 ```
@@ -180,9 +231,10 @@ curl -X DELETE http://localhost:8000/memories
 **Backend:**
 - Python 3.11
 - FastAPI
-- sqlite-vec (vector database)
+- Longbow (Apache Arrow Flight gRPC)
 - sentence-transformers (all-MiniLM-L6-v2)
-- MCP SDK
+- MCP SDK (stdio + SSE transports)
+- Starlette (SSE server)
 - WebSocket
 
 **Frontend:**
