@@ -9,10 +9,13 @@ function App() {
     memories,
     searchResults,
     isSearching,
+    graphData,
     searchMemories,
     addMemory,
     deleteAllMemories,
-    refreshMemories
+    refreshMemories,
+    traverseGraph,
+    addEdge,
   } = useMemoryBridge();
 
   return (
@@ -28,10 +31,13 @@ function App() {
           memories={memories}
           searchResults={searchResults}
           isSearching={isSearching}
+          graphData={graphData}
           onSearch={searchMemories}
           onAdd={addMemory}
           onDeleteAll={deleteAllMemories}
           onRefresh={refreshMemories}
+          onTraverse={traverseGraph}
+          onAddEdge={addEdge}
         />
       </div>
     </div>

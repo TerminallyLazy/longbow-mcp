@@ -9,12 +9,14 @@ import {
   Plus,
   Zap,
   Wifi,
-  WifiOff
+  WifiOff,
+  GitBranch
 } from 'lucide-react';
-import { Memory, MemoryStats, SearchResult } from '../hooks/useMemoryBridge';
+import { Memory, MemoryStats, SearchResult, GraphData } from '../hooks/useMemoryBridge';
 import MemoryCard from './MemoryCard';
 import SearchPanel from './SearchPanel';
 import AddMemoryForm from './AddMemoryForm';
+import GraphPanel from './GraphPanel';
 
 interface MemoryHUDProps {
   isConnected: boolean;
@@ -22,10 +24,13 @@ interface MemoryHUDProps {
   memories: Memory[];
   searchResults: SearchResult[];
   isSearching: boolean;
+  graphData: GraphData;
   onSearch: (query: string, topK?: number) => void;
   onAdd: (content: string, metadata: Record<string, unknown>) => void;
   onDeleteAll: () => void;
   onRefresh: () => void;
+  onTraverse: (startId: string, maxHops?: number, incoming?: boolean, decay?: number, weighted?: boolean) => void;
+  onAddEdge: (sourceId: string, targetId: string, predicate?: string, weight?: number) => void;
 }
 
 export function MemoryHUD({
@@ -34,12 +39,15 @@ export function MemoryHUD({
   memories,
   searchResults,
   isSearching,
+  graphData,
   onSearch,
   onAdd,
   onDeleteAll,
-  onRefresh
+  onRefresh,
+  onTraverse,
+  onAddEdge,
 }: MemoryHUDProps) {
-  const [activeTab, setActiveTab] = useState<'all' | 'search' | 'add'>('all');
+  const [activeTab, setActiveTab] = useState<'all' | 'search' | 'add' | 'graph'>('all');
 
   return (
     <div className="h-full p-6 overflow-hidden">
@@ -174,6 +182,18 @@ export function MemoryHUD({
               <Plus className="w-4 h-4" />
               <span>Add Memory</span>
             </button>
+
+            <button
+              onClick={() => setActiveTab('graph')}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-left transition-all
+                         ${activeTab === 'graph'
+                           ? 'bg-emerald/10 text-emerald'
+                           : 'text-white/60 hover:bg-white/5 hover:text-white'
+                         }`}
+            >
+              <GitBranch className="w-4 h-4" />
+              <span>Graph</span>
+            </button>
           </nav>
 
           {/* Quick stats */}
@@ -229,6 +249,15 @@ export function MemoryHUD({
 
           {activeTab === 'add' && (
             <AddMemoryForm onAdd={onAdd} />
+          )}
+
+          {activeTab === 'graph' && (
+            <GraphPanel
+              memories={memories}
+              graphData={graphData}
+              onTraverse={onTraverse}
+              onAddEdge={onAddEdge}
+            />
           )}
         </div>
       </div>

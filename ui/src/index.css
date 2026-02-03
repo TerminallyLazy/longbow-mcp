@@ -67,3 +67,14 @@ body {
 .animate-fade-in {
   animation: fadeIn 0.3s ease-out forwards;
 }
+
+/* Graph canvas transparent background */
+.force-graph-container canvas {
+  background: transparent !important;
+}
+
+/* Node glow effect for CSS overlays */
+.graph-node-glow {
+  box-shadow: 0 0 8px rgba(94, 247, 166, 0.4),
+              0 0 16px rgba(94, 247, 166, 0.2);
+}

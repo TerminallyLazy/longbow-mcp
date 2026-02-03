@@ -160,7 +160,7 @@ def handle_tool_call(name: str, arguments: dict, store: MemoryStore) -> list[Tex
         elif name == "hybrid_search_memories":
             query = arguments.get("query")
             top_k = arguments.get("top_k", 5)
-            alpha = arguments.get("alpha", 0.5)
+            alpha = float(arguments.get("alpha", 0.5))
             results = store.hybrid_search(query, top_k, alpha)
             if not results:
                 return [TextContent(type="text", text="No memories found (hybrid search).")]
@@ -196,7 +196,7 @@ def handle_tool_call(name: str, arguments: dict, store: MemoryStore) -> list[Tex
             source_id = arguments.get("source_id")
             target_id = arguments.get("target_id")
             predicate = arguments.get("predicate", "related_to")
-            weight = arguments.get("weight", 1.0)
+            weight = float(arguments.get("weight", 1.0))
             store.add_edge(source_id, target_id, predicate, weight)
             return [TextContent(type="text", text=f"Edge added: {source_id} --[{predicate}]--> {target_id} (weight={weight})")]
 
@@ -204,7 +204,7 @@ def handle_tool_call(name: str, arguments: dict, store: MemoryStore) -> list[Tex
             start_id = arguments.get("start_id")
             max_hops = arguments.get("max_hops", 2)
             incoming = arguments.get("incoming", False)
-            decay = arguments.get("decay", 0.0)
+            decay = float(arguments.get("decay", 0.0))
             weighted = arguments.get("weighted", True)
             nodes = store.traverse(start_id, max_hops, incoming, decay, weighted)
             result = json.dumps({"start_id": start_id, "nodes": nodes, "hops": max_hops}, indent=2, default=str)

@@ -134,10 +134,69 @@ Add to your project's `.mcp.json`:
 
 ### Agent Zero / SSE Clients
 
-Use the SSE endpoint:
+The MCP SSE transport is available at `http://localhost:8765/sse` for any MCP client that supports Server-Sent Events.
 
+**Agent Zero running on the host machine:**
+
+```json
+{
+  "mcpServers": {
+    "longbow-mcp": {
+      "description": "Persistent vector memory with semantic, hybrid, filtered search and graph operations",
+      "url": "http://localhost:8765/sse"
+    }
+  }
+}
 ```
-http://localhost:8765/sse
+
+**Agent Zero running inside Docker (on Mac/Windows):**
+
+When your MCP client runs in its own Docker container, `localhost` refers to that container's own network — not the host. Use `host.docker.internal` to reach host-mapped ports:
+
+```json
+{
+  "mcpServers": {
+    "longbow-mcp": {
+      "description": "Persistent vector memory with semantic, hybrid, filtered search and graph operations",
+      "url": "http://host.docker.internal:8765/sse"
+    }
+  }
+}
+```
+
+**Agent Zero running inside Docker (on Linux):**
+
+Linux requires an extra host entry. Add this to your Agent Zero service in `docker-compose.yml`:
+
+```yaml
+extra_hosts:
+  - "host.docker.internal:host-gateway"
+```
+
+Then use the same `host.docker.internal:8765` URL above.
+
+**Shared Docker network (alternative):**
+
+If both Longbow MCP and your client use Docker Compose, you can place them on the same network instead. Add this to your client's `docker-compose.yml`:
+
+```yaml
+networks:
+  default:
+    name: mcp-memory_mcp-network
+    external: true
+```
+
+Then connect directly by service name:
+
+```json
+{
+  "mcpServers": {
+    "longbow-mcp": {
+      "description": "Persistent vector memory with semantic, hybrid, filtered search and graph operations",
+      "url": "http://mcp-sse:8765/sse"
+    }
+  }
+}
 ```
 
 ### Claude Desktop

@@ -366,6 +366,19 @@ async def websocket_endpoint(websocket: WebSocket):
                         },
                     }))
 
+                elif action == "add_edge":
+                    source_id = data.get("source_id", "")
+                    target_id = data.get("target_id", "")
+                    predicate = data.get("predicate", "related_to")
+                    weight = float(data.get("weight", 1.0))
+                    store.add_edge(source_id, target_id, predicate, weight)
+                    await broadcast_update("edge_added", {
+                        "source_id": source_id,
+                        "target_id": target_id,
+                        "predicate": predicate,
+                        "weight": weight,
+                    })
+
                 elif action == "add_memory":
                     memory = store.add_memory(
                         data.get("content", ""),
